@@ -1,0 +1,2549 @@
+/* characterizing alternate code for recalculation of Item_subselect::used_tables_cache */
+/* current patches in MDEV-32294-Work_In_Progress */
+/* index to characterization test
+
+[1st digit, Execution method].[2nd digit, Class].[number of outer references to a parent].[number of outer references to a subquery].[number of outer references to parent from subquery].[#item subselects].[# references to expressions]
+Execution method, [0 normal][1 prepared statement][2 wrapped in a derived table][3 wrapped in a view][4 wrapped in a CTE][5 as a procedure]
+Class 0, not mergeable
+Class 1, view mergeable
+Class 1a, derived table mergeable
+Class 1b, cte mergeable
+Class 2, subquery mergeable
+Class 3, multiple outer_select paths
+Class 4, unions
+Class 5, subqueries in group by and order by with references to parent select_lex
+Class 6, subquery merge into derived merge
+Class 7, odds and ends
+
+*/
+
+create table t1 (t1a int, t1b int, t1c int) engine=myisam;
+insert into t1 values (1,1,1),(2,2,2);
+
+create table t2 (t2a int, t2b int, t2c int) engine=myisam;
+insert into t2 values (1,1,1),(2,2,2),(3,3,3);
+
+create table t3 (t3a int, t3b int, t3c int) engine=myisam;
+insert into t3 values (1,1,1),(2,2,2),(3,3,3),(4,4,4);
+
+create table t4 (t4a int, t4b int, t4c int) engine=myisam;
+insert into t4 values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5);
+
+create table t5 (t5a int, t5b int, t5c int) engine=myisam;
+insert into t5 values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6);
+
+create table t6 (t6a int, t6b int, t6c int) engine=myisam;
+insert into t6 values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7);
+
+create table t7 (t7a int, t7b int, t7c int) engine=myisam;
+insert into t7 values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7),(8,8,8);
+
+create view v1 (v1a, v1b) as select t7a, t7b from t7 where t7c > 4;
+create view v2 (v2a, v2b) as
+  select t7a*t5c, t7b*t5c from t7, t5 where t7a = t5a and t7c > 4;
+create view v3 (v3a) as select t1a FROM t1 where exists
+(
+  SELECT t2a FROM t2 WHERE t2a = t1a
+);
+create view v4 (v4a) as select t1a FROM t1 where exists
+(
+  SELECT t2a FROM t2 WHERE t2a = t1a and t2b = t1b
+);
+
+# test case X.0.1.0.0.1.0
+# non mergeable with outer reference
+
+let $v= 0.1.0.0.1.0;
+let $q=
+select * from t1, t6 where t6a=t1a or                           -- select 1
+(
+  select max(t4a) from t4 where t4c < t1b                       -- select 2
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# reference to a view in where clause, non-mergeable
+
+let $v= 0a.1.0.0.1.0;
+let $q= select * from v1 where v1a >= any
+(
+  select t2a from t2 where t2b >= v1b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#fix_outer_fields() on Item_field v1b
+#  checks outer_context()
+#  find_field_in_tables()
+#    finds field v1b in outer_context->*tables
+#    it's a view field
+#    adds Item_field v1b to outer_context->select_lex::outer_reference_resolved_here
+#
+#JOIN::optimize
+#Item_subselect::recalc_used_tables()
+#  no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#  new_parent is select #1
+#  new_parent->outer_references_resolved_here, 1 element {v1b}
+#  element belongs to this->unit?
+#    defined is (select #2)
+#    defined master_unit() == this->unit  (true)
+#
+#  we have NULL item->field, but we do have item->cached_table
+#    use cached_table->field_translation to get item pointed (t1a)
+#    collect bitmaps for Item_fields within expressions in t1a
+#    'add' this bitmap to used_tables_cache
+#
+#JOIN::optimize_inner
+#Item_subselect::recalc_used_tables()
+#  no change from above
+#
+#called again many times during optimize_inner
+
+
+
+
+
+
+# Class 1, view  mergeable
+
+# mergeable view with outer reference to merged select inside a view
+# note, reference is indirectly to table number 2
+
+let $v= 1.1.0.0.1.0;
+let $q= select * from t6, v1 where t6a=v1a and                  -- select 1
+(
+  select max(t4a) from t4 where t4c < v1b                       -- select 2
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();               # this doesn't work so well
+call p();
+drop procedure p;
+
+# these blocks are notes on program flow, overall execution observed in debugger
+# finer details described to characterize how attributes are calculated
+# 
+# collection of SELECT_LEX::outer_reference_resolved_here
+# 
+# execute_sqlcom_select
+# 
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`v1b`)
+#      not found in table list of  select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v1b to outer_references
+#        (select 1)::outer_references_resolved_here:{v1b}
+#
+#      no more outer references found
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (select #2)
+#      new_parent        (select #1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      loop though (select #1)::outer_references_resolved_here {v1b}
+#        v1b defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v1b belongs to this Item_subselect
+#        v1b was resolved to be t7b, so we
+#        collect bitmaps for Item_fields within this expression
+#        t7 is table number 2, collector.used_tables = 0b10
+#          used_tables_cache|= collector.used_tables
+#      end loop
+
+
+# as above, but run as a prepared statement
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#check_prepared_statement
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#    fix_fields called on (FIELD_ITEM*)(`v1b`)
+#      not found in table list of select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      NOT added to outer_references_resolved_here due to thd->stmt_arena->state
+#
+#execute_sqlcom_select
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`v1b`)
+#      not found in table list of  select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v1b to outer_references
+#        (select 1)::outer_references_resolved_here:{v1b}
+#
+#      no more outer references found
+#
+#mysql_sql_stmt_execute
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (select #2)
+#      new_parent        (select #1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      loop though (select #1)::outer_references_resolved_here {v1b}
+#        v1b defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v1b belongs to this Item_subselect
+#        v1b was resolved to be t7b, so we
+#        collect bitmaps for Item_fields within this expression
+#        t7 is table number 2, collector.used_tables = 0b10
+#          used_tables_cache|= collector.used_tables
+#      end loop
+
+
+
+
+# reference to a view in where clause, mergeable
+let $v= 1a.1.0.0.1.0;
+let $q= select * from v1 where v1a in
+(
+  select t2a from t2 where t2b >= v1b
+);
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#fix_outer_fields() on Item_field v1b
+#  checks outer_context()
+#  find_field_in_tables()
+#    finds field v1b in outer_context->*tables
+#    it's a view field
+#    adds Item_field v1b to outer_context->select_lex::outer_reference_resolved_here
+#
+#JOIN::optimize
+#Item_subselect::recalc_used_tables()
+#  no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#  new_parent is select #1
+#  new_parent->outer_references_resolved_here, 1 element {v1b}
+#  element belongs to this->unit?
+#    defined is (select #2)
+#    defined master_unit() == this->unit  (true)
+#
+#  we have NULL item->field, but we do have item->cached_table
+#    use cached_table->field_translation to get item pointed (t1a)
+#    collect bitmaps for Item_fields within expressions in t1a
+#    'add' this bitmap to used_tables_cache
+#
+#  no more items
+
+
+# mergeable view with outer reference to merged select inside a view
+# note, reference is to an expression with 2 tables not a simple field
+
+let $v= 1.1.0.0.1.1
+let $q=select * from t6, v2 where t6a=v2a and                   -- select 1
+(
+  select max(t4a) from t4 where t4c < v2b                       -- select 2
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#execute_sqlcom_select
+#
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`v2b`)
+#      not found in table list of  select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v2b to outer_references
+#        (select 1)::outer_references_resolved_here:{v2b}
+#
+#      no more outer references found
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (select #2)
+#      new_parent        (select #1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#        used_tables_cache= 0;
+#      loop though (select #1)::outer_references_resolved_here {v2b}
+#        v2b defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v2b belongs to this Item_subselect
+#        Item_field(v2b)->field is null
+#          Item_field(v2b)->cached_table is not null, so
+#          v2b resolved to an Item_func containing t7.t7a*t5.t5c
+#            we walk this tree collecting the table->map of Item_fields
+#              find t7a, bitmap is 0b10
+#              find t5c, bitmap is 0b100
+#            collector.used_tables = 0b110
+#        used_tables_cache|= collector.used_tables
+#      end loop
+#
+#   called again in JOIN::optimize_inner() after exists-to-in and min/max optimization.  repeat of above
+#   and again, later on in JOIN::optimize_inner(), many times
+
+
+
+
+
+
+# mergeable view with two outer references to merged select inside a view
+# not, reference is indirectly to table number 2
+
+let $v=1.2.0.0.1.1;
+let $q=select * from t6, v1, v2 where t6a=v1a and t6b * t6a  = v2b and   -- select 1
+(
+  select max(t4a) from t4, t5                                     -- select 2
+  where t5a = t4a and t4c < v1b and t5b < v2b
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();               # this doesn't work so well
+call p();
+drop procedure p;
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#execute_sqlcom_select
+#
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`v1b`)
+#      not found in table list of  select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v1b to outer_references
+#        (select 1)::outer_references_resolved_here:{v1b}
+#
+#    fix_fields called on (FIELD_ITEM*)(`v2b`)
+#      not found in table list of  select#2 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v2b to outer_references
+#        (select 1)::outer_references_resolved_here:{v1b, v2b}
+#
+#      no more outer references found
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (select #2)
+#      new_parent        (select #1)
+#        table_list is {t6, v1, v2}
+#        tables are    (t5, t7(2), t7, t6}
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      loop though (select #1)::outer_references_resolved_here {v1b, v2b}
+#
+#        v1b defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v1b belongs to this Item_subselect
+#        v1b resolved to t7.t7a
+#            t7 is table number 2, collector.used_tables = 0b10
+#        used_tables_cache|= collector.used_tables
+#        used_tables_cache == 0b10
+#
+#        v2b defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v2b belongs to this Item_subselect
+#        Item_field(v2b)->field is null
+#          Item_field(v2b)->cached_table is not null, so
+#          v2b resolved to an Item_func containing t7.t7a*t5.t5c
+#            we walk this tree collecting the table->map of Item_fields
+#            find t7a, bitmap is 0b100
+#            find t5c, bitmap is 0b1000
+#          collector.used_tables = 0b1100
+#        used_tables_cache|= collector.used_tables
+#        used_tables_cache == 0b1110      {t5, t7(2), t7}
+#      end loop
+
+
+
+# mergeable view with two outer references to merged select inside a view
+# references to different select levels
+
+let $v= 1.1.1.0.2.1;
+let $q= select * from t6, v1 where t6a=v1a and t6b in             -- select 1
+(
+  select sqrt(v2b) from v2 where                                  -- select 2
+  (
+    select max(t4a) from t4, t5                                   -- select 3
+    where t5a = t4a and t4c < v1b and t5b < v2b
+  ) <> 0
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();               # this doesn't work so well
+call p();
+drop procedure p;
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#execute_sqlcom_select
+#
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`v1b`)
+#      not found in table list of  select#3 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#2 (select sqrt(v2b) from v2 where ...)
+#      find_field_in_tables()   of select #2
+#        not found
+#      checks outer_context, this is select#1 (select ... from t6 join v1 ...)
+#      find_field_in_tables()   of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field v1b to outer_references
+#        (select 1)::outer_references_resolved_here:{v1b}
+#
+#    fix_fields called on (FIELD_ITEM*)(`v2b`)
+#      not found in table list of  select#3 (select max(t4.t4a) from t4 where t4.t4c < t7.t7b - 1)
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#2 (select sqrt(v2b) from v2 where ...)
+#      find_field_in_tables()   of select #2
+#        finds field in table v1 of select #2
+#        adds Item_field v2b to outer_references
+#        (select 2)::outer_references_resolved_here:{v2b}
+#
+#      no more outer references found
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (t6b in (select #2))
+#      new_parent        (select #1)
+#        table_list is {t6, v1}
+#        tables are    (t7, t6)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      loop though (select #1)::outer_references_resolved_here {v1b}
+#
+#        v1b defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So v1b belongs to this Item_subselect
+#        Item_field(v1b)->field is null
+#          Item_field(v1b)->cached_table is not null, so
+#          collect bitmaps for Item_fields within
+#              cached_table->field_translation->item
+#              this is t7.t7a
+#              t7 is table number 2, collector.used_tables = 0b10
+#          used_tables_cache|= collector.used_tables
+#          used_tables_cache == 0b10
+#      end loop
+#
+#    Item_subselect::recalc_used_tables  called on (select max(t4a) from t4 join t5 where ...)
+#      new_parent        (select #2)
+#        table_list is {v2}
+#        tables are    (t5, t7(2))
+#      yes outer bit this->min_resolved_nest_level(0) is less than new_parent->nest_level (1)
+#        used_tables_cache = 0b100000000000000000000000000000000000000000000000000000000000000
+#      loop though (select #2)::outer_references_resolved_here {v2b}
+#        v2b defined in (select #3), so unit chain is {(select #3)->unit, (select #1)->unit, ...}
+#        this->unit is (select #3)->unit
+#        So v2b belongs to this Item_subselect
+#        Item_field(v2b)->field is null
+#          Item_field(v2b)->cached_table is not null, so
+#          collect bitmaps for Item_fields within
+#              cached_table->field_translation->item
+#              this is an Item_func containing t7.t7a*t5.t5c
+#              we walk this tree collecting the table->map of Item_fields
+#                find t7a, bitmap is 0b1
+#                find t5c, bitmap is 0b10
+#              collector.used_tables = 0b11
+#          used_tables_cache|= collector.used_tables
+#          used_tables_cache == 0b100000000000000000000000000000000000000000000000000000000000011      {OUTER_BIT, t5, t7(2)}
+#
+#
+#  JOIN::optimize /// convert_subq_to_sj() /// sj_nest->sj_on_expr->fix_after_pullout ///
+#    here select 2 is merged into select 1, looking like this
+#      select t6.t6a AS t6a,t6.t6b AS t6b,t6.t6c AS t6c,t7.t7a AS v1a,t7.t7b AS v1b from (((t7 join t5))) join t6 join (t7) on(t7.t7c > 4) where t6.t6a = t7.t7a and t6.t6b in (subquery#2)
+#
+#
+#    we process (select 1)::outer_references_resolved_here {v1b}, removing items that are defined in select 2.  None in this case. (tested in 3.0.0)
+#    we append (select 2)::outer_references_resolved_here {v2b} to (select 2)::outer_references_resolved_here.
+#    (select 1)::outer_references_resolved_here == {v1b, v2b}
+#    and empty (select 2)::outer_references_resolved_here == {}
+#
+#
+#    Item_subselect::recalc_used_tables  called on (select max(t4a) from t4 join t5 where ...)
+#      new_parent        (select #1)
+#        table_list is {t6, v1, v2}
+#        tables are    (t5, t7(2), t7, t6)
+#      no outer bit this->min_resolved_nest_level(0) is less than new_parent->nest_level (0)
+#        used_tables_cache = 0
+#      loop though (select #1)::outer_references_resolved_here {v1b, v2b}
+#
+#        v1b defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #3)->unit
+#        So v1b belongs to this Item_subselect
+#        Item_field(v1b)->field is null
+#          Item_field(v1b)->cached_table is not null, so
+#          collect bitmaps for Item_fields within
+#              cached_table->field_translation->item
+#              this is t7.t7a
+#              t7 is table number 2, collector.used_tables = 0b10
+#          used_tables_cache|= collector.used_tables
+#          used_tables_cache == 0b10
+#
+#        v2b defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, ...}
+#        this->unit is (select #3)->unit
+#        So v2b belongs to this Item_subselect
+#        Item_field(v2b)->field is null
+#          Item_field(v2b)->cached_table is not null, so
+#          collect bitmaps for Item_fields within
+#              cached_table->field_translation->item
+#              this is an Item_func containing t7.t7a*t5.t5c
+#              we walk this tree collecting the table->map of Item_fields
+#                find t7a, this t7 is table 3 bitmap is 0b100
+#                find t5c, t5 is table 4 bitmap is 0b1000
+#              collector.used_tables = 0b1100
+#          used_tables_cache|= collector.used_tables
+#          used_tables_cache == 1110      {t5, t7(2), t7}  // NOT t6
+#
+#      end loop
+#
+#no more interesting transformations, Item_subselect::recalc_used_tables called many more times in JOIN::optimize_inner
+
+
+
+#  test remove_references_to()
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v=1.1.1.1.2.0;
+let $q=select t1a from t1 join t4 on t1c = t4c       -- select 1 parent
+where t1a in
+(
+  select t2a from t2                          -- select 2 merge
+  where t2b >= any
+  (
+    select t3b from t3 where t3c >= t1b       -- select 3
+  )
+  and t2b >= t4c
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();               # this doesn't work so well
+call p();
+drop procedure p;
+
+#execute_sqlcom_select
+#
+#  JOIN::prepare //// setup_conds //// Item_field::fix_outer_field
+#
+#    fix_fields called on (FIELD_ITEM*)(`t1b`)
+#      not found in table list of  select#3
+#    calls fix_outer_fields()
+#      checks outer_context, this is select#2
+#      find_field_in_tables()  of select #2
+#        not found, next outer_context
+#      find_field_in_tables()  of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field t1b to outer_references
+#        (select 1)::outer_references_resolved_here:{t1b}
+#
+#    fix_fields called on (FIELD_ITEM*)(`t4c`)
+#      not found in table list of  select#2
+#    calls fix_outer_fields()
+#      find_field_in_tables()  of select #2
+#        not found, next outer_context
+#      find_field_in_tables()  of select #1
+#        finds field in table v1 of select #1
+#        adds Item_field t4c to outer_references
+#        (select 1)::outer_references_resolved_here:{t1b, t4c}
+#
+#      no more outer references found
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on t1a in (select #2)
+#      new_parent        (select #1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#        used_tables_cache= 0;
+#      loop though (select #1)::outer_references_resolved_here {t1b, t4c}
+#
+#        t1b defined in (select #3), so unit chain is {(select 3)->unit, (select #2)->unit, (select #1)->unit}
+#        this->unit is (select #2)->unit
+#        So t1b belongs to this Item_subselect
+#        Item_field(t1b)->field not null
+#        field->map->table is 0b1
+#        used_tables_cache is 0b1
+#
+#        t4c defined in (select #2), so unit chain is {(select #2)->unit, (select #1)->unit}
+#        this->unit is (select #2)->unit
+#        So t4c belongs to this Item_subselect
+#        Item_field(t4c)->field not null
+#        field->map->table is 0b10
+#        used_tables_cache is 0b11
+#
+#      end loop
+#
+#      used_tables_cache is 0b11
+#
+#    Item_subselect::recalc_used_tables  called on (select 3)
+#      OUTER_REF_TABLE_BIT set, but (select 2)::outer_references_resolved_here is empty, so no other bits.
+#
+#    select 2 is merged into select 1 by convert_subq_to_sj
+#      parent_lex is (select 1)
+#      (select 1)::outer_references_resolved_here is {t1b, t4c}
+#      (select 2)::outer_references_resolved_here is {}
+#      before we append the latter to the former we call to remove things that will
+#      no longer be an outer reference (i.e. defined in the subquery, now in parent query)
+#    remove_references_to(parent_lex->outer_references_resolved_here, subq_lex)
+#    loop over (select #1)::outer_references_resolved_here {t1b, t4c}
+#
+#      t1b is defined in (select 3)
+#         do not remove
+#
+#      t4c is defined in (select 2)
+#        this is our subq_lex (child select in merge)
+#        we remove this item from the list
+#
+#    end loop
+#
+#    (select #1)::outer_references_resolved_here is now {t1b}
+#
+#        we now recalculate bitmaps
+#
+#    Item_subselect::recalc_used_tables  called on (select 3)
+#      new_parent        (select #1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#        used_tables_cache= 0;
+#      loop though (select #1)::outer_references_resolved_here {t1b}
+#
+#        t1b defined in (select #3), so unit chain is {(select 3)->unit, (select #2)->unit, (select #1)->unit}
+#        this->unit is (select #2)->unit
+#        So t1b belongs to this Item_subselect
+#        Item_field(t1b)->field not null
+#        field->map->table is 0b1
+#        used_tables_cache is 0b1
+#
+#      end loop
+#      used_tables_cache is 0b1
+#
+#        the above called many times during optimize with the same parent
+
+#  test remove_references_to()
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v= 1.3.2.2.2.0;
+let $q= select t1a from t1 join t4 on t1c = t4c       -- select 1
+where t1a in
+(
+  select t2a from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c >= t1b       -- select 3
+     and t3a >= t1c and t3b >= t1a
+  )
+  and t2b >= t4c and t2a >= t4a
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#  test remove_references_to()
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v= 1.3.1.1.2.1;
+let $q= select t1a from t1 join v2 on t1c = v2b       -- select 1
+where t1a in
+(
+  select t2a from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c >= t1b       -- select 3
+     and t3a >= t1c and t3b >= t1a
+  )
+  and t2b >= v2b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+#  test remove_references_to()
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v= 1.3.2.2.2.2;
+let $q= select t1a from t1 join v2 on t1c = v2b       -- select 1
+where t1a in
+(
+  select t2a from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c >= t1b       -- select 3
+     and t3a >= t1c and t3b >= t1a
+  )
+  and t2b >= v2b and t2a >= v2a
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+# Class 1a, derived mergeable
+# mergeable derived table with outer reference to merged select
+
+let $v= 1a.2.0.0.1.0
+let $q= select * from t6, (select t7a as dt1a, t7b as dt1b from t7 where t7c > 4) dt1
+where t6a=dt1a and                                                -- select 1
+(
+  select max(t4a) from t4 where t4c <= dt1b                       -- select 2
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v= 1a.3.1.1.2.1;
+let $q= select t6a from t6                            -- select 1
+join (select t7a as dt1a, t7b*t7c as dt1b from t7 where t7c > 4) dt1
+  on t6c = dt1a
+where t6a in
+(
+  select t2a+3 from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c <= t6b       -- select 3
+     and t3a <= t6c and t3b <= t6a
+  )
+  and t2b <= dt1b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+
+let $v= 1a.3.1.1.2.2;
+let $q= select t6a from t6                            -- select 1
+join (select t7a as dt1a, t7b*t7c as dt1b, t7b*2 as dt1c from t7
+      where t7c > 4) dt1
+  on t6c = dt1a
+where t6a in
+(
+  select t2a+3 from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c <= t6b       -- select 3
+     and t3a <= t6c and t3b <= dt1c
+  )
+  and t2b <= dt1b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+# Class 1b, cte mergeable
+# mergeable derived table with outer reference to merged select
+let $v= 1b.2.0.0.1.0;
+let $q= with cte1 (c1, c2) as (select t7a, t7b from t7 where t7c > 4)
+select * from t6, cte1
+where t6a=c1 and                                                -- select 1
+(
+  select max(t4a) from t4 where t4c <= c2                       -- select 2
+) <> 0;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#  we need an outer reference that is resolved in the query that where it is defined is merged into.
+#  here t1c in select 2 is outer reference before merge of select 2 into select 1
+#  not after
+let $v=1b.3.1.1.2.1;
+let $q= with cte1 (c1, c2) as (select t7a, t7b*t7c from t7 where t7c > 4)
+select t6a from t6                            -- select 1
+join cte1
+  on t6c = c1
+where t6a in
+(
+  select t2a+3 from t2                          -- select 2
+  where t2b >= any
+  (
+    select t3b from t3 where t3c <= t6b       -- select 3
+     and t3a <= t6c and t3b <= t6a
+  )
+  and t2b <= c2
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# Class 2, mergeable subquery   typically
+# select ...  col in (subquery)
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+let $v=2.1.0.0.1.0:
+let $q= select * from t1, t2 where t1a=t2a and t1b in             -- select 1
+(
+  select t3b from t3                                              -- select 2
+    where t3b <= t2b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+
+let $v= 2.1.0.0.1.1;
+let $q= select * from t1, v2 where t1a<=v2a and t1b in            -- select 1
+(
+  select t3b from t3                                              -- select 2
+    where t3b <= v2b
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+# mergeable view with outer reference to merged select inside a view
+
+let $v= 2.0.1.1.1.0;
+let $q= select * from t1                                        -- select 2
+where t1c in
+(
+   select t2a from t2                                           -- select 3
+     where t2b in (select t3b from t3 where t3a >= t2c)         -- select 4
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#
+#mysql_test_select  setup_conds on (select 4)
+#  this is the statement preparation
+#  THIS IS NOT NEEDED, STOP THIS
+#
+#  (select x)::outer_references_resolved_here set to {}
+#
+#  JOIN::prepare on select 4
+#  fix_fields on t2c, field not found in table list of select 4
+#  calls fix_outer_fields()
+#    checks outer_context     select 3
+#    find_field_in_tables()   of select 3
+#      finds field t2c in table t2 of select 3
+#      adds Item_field t1c to outer_references              (select 3)::outer_references_resolved_here:{t2c}
+#
+#    no more outer references found
+#
+#
+#mysql_sql_stmt_execute  setup_conds on select 4
+#  this is the first execution of the statement
+#
+#  (select x)::outer_references_resolved_here set to {}
+#
+#  JOIN::prepare on select 4
+#  fix_fields on t2c, field not found in table list of select 4
+#  calls fix_outer_fields()
+#    checks outer_context     select 3
+#    find_field_in_tables()   of select 3
+#      finds field t2c in table t2 of select 3
+#      adds Item_field t1c to outer_references              (select 3)::outer_references_resolved_here:{t2c}
+#
+#    no more outer references found
+#
+#  JOIN::optimize on (select 1)  goes through table list of derived, calls mysql_derived_merge,
+#    this merges (select 2) into (select 1),
+#    both (select 2)::outer_references_resolved_here and (select 1)::outer_references_resolved_here as null
+#    we call Item_in_subselect::fix_after_pullout
+#    which calls
+#
+#    Item_subselect::recalc_used_tables
+#      First Item_subselect is (t1c in (select #3))
+#
+#      new_parent is (select 1) which now looks like (select t1.t1a AS t1a,t1.t1b AS t1b,t1.t1c AS t1c from (t1))
+#      (select #3)::min_resolved_nest_level is INT_MAX
+#      new_parent->nest_level is 0, so no outer_reference passes 'through' this select_lex
+#      we do not set OUTER_REF_TABLE_BIT on used_tables_cache
+#      (select 1)::outer_references_resolved_here is null, so our used_tables_cache remains all zero.
+#
+#    optimize_inner calls convert_join_subqueries_to_semijoins()
+#
+#      here we merge (select 3) into (select 1), 
+#      early on we call
+#      join->conds->update_used_tables() first, which calls
+#
+#      Item_subselect::recalc_used_tables on (t2b in (select 4))
+#
+#        new_parent is (select 3) (select t2a from t2 where t2b in (select 4))
+#
+#        min_resolved_nest_level == 1
+#        new_parent->nest_level == 1  -> no outer bit
+#
+#        (select 3)::outer_references_resolved_here is {t1.t1a}
+#        loop with t2c
+#          t1.t1a outer_select chain is (defined,unit of select 4), (unit of select 3) etc
+#          Item_subselect::unit == (unit of select 4), so t2.t2c does belong to this Item_subselect
+#          this is a simple Item_field with a populated field attribute, so we use it
+#          used_tables_cache|= field->table->map;
+#        end loop
+#
+#      now later on in convert_join_subqueries_to_semijoins
+#      we merge (select 3)::outer_references_resolved_here  {t1.t1a}
+#      into (select 1)::outer_references_resolved_here NULL (no checking for items resolved in (select 3))
+#
+#Item_subselect::recalc_used_tables is not subsequently called.  This is probably an error.
+
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+let $v= 2.1.0.0.1.2;
+let $q= select * from t1, v2 where t1a<=v2a and t1b in            -- select 1
+(
+  select t3b from t3                                              -- select 2
+    where t3b <= v2b and t3a <= v2a
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+
+let $v= 2.2.0.0.1.0;
+let $q= select * from t1, t2 where t1a=t2a and t1b in       -- select 1
+(
+  select t3b from t3                                        -- select 2
+    where t3b <= t1a*t2a
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+let $v= 2.1.1.0.2.0;
+let $q= select * from t6, t7 where t6a=t7a and t6b in             -- select 1
+(
+  select t2b from t2 where                                        -- select 2
+  (
+    select max(t4a) from t4, t5                                   -- select 3
+    where t5a = t4a and t4c < t7b and t5b < t2b
+  ) <> 0
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# mergeable subquery with two outer references to merged select
+# references to different select levels
+
+let $v= 2.2.1.0.2.0
+let $q= select * from t6, t7 where t6a=t7a and t6b in             -- select 1
+(
+  select t2b from t2 where                                        -- select 2
+  (
+    select max(t4a) from t4, t5                                   -- select 3
+    where t5a = t4a and t4c < t7b and t5b < t2b*t6a
+  ) <> 0
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+#  Class 3, multiple outer_select paths
+
+#  next we need to test Item_belongs_to by introducing an element that fails the test
+#  outer_reference t2a which is resolved in select 1 does not belong to
+#  Item_subselect t1a in (select #2).
+#  similarly, t1a, resolved in the same place, does not belong in
+#  Item_subselect t2a in (select #4).
+
+let $v= 3.2.0.0.2.0;
+let $q= select * from t1, t2                            -- select #1, parent
+where
+t1a in
+(
+  select t3b from t3                                    -- select #2, merged
+  where 10 >
+  (
+    select count(*) from t4 where t4b < t1a             -- select #3
+  )
+)
+and 
+t2a in
+(
+  select t5c from t5                                    -- select #4, merged
+  where 10 >
+  (
+    select count(*) from t6 where t6b < t2a             -- select #5
+  )
+);
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#execute_sqlcom_select
+#
+#  JOIN::prepare //// setup_conds ////
+#    Item_field::fix_outer_field on Item_field t1a
+#      resolved in select #1
+#      (select 1)::outer_reference_resolved_here = {t1a}
+#    Item_field::fix_outer_field on Item_field t2a
+#      resolved in select #1
+#      (select 1)::outer_reference_resolved_here = {t1a, t2a}
+#
+#  JOIN::optimize /// st_select_lex::update_used_tables ///
+#    Item_subselect::recalc_used_tables  called on (t1a in (select #2))
+#      new_parent        (select #1)
+#        table_list is {t1, t2}
+#        tables are    (t2, t1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      used_tables_cache= 0
+#      loop though (select #1)::outer_references_resolved_here {t1a, t2a}
+#
+#        t1a defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So t1a belongs to this Item_subselect
+#        Item_field(t1a)->field is populated
+#        field->map->table is 0b1
+#        used_tables_cache is 0b1
+#
+#        t2a defined in (select #5), so unit chain is {(select #5)->unit, (select #4)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So t2a does NOT belong to this Item_subselect
+#          skipped to next item
+#
+#      end loop
+#      used_tables_cache is 0b1
+#
+#    Item_subselect::recalc_used_tables  called on (t2a in (select #4))
+#      new_parent        (select #1)
+#        table_list is {t1, t2}
+#        tables are    (t2, t1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      used_tables_cache= 0
+#      loop though (select #1)::outer_references_resolved_here {t1a, t2a}
+#
+#        t1a defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #4)->unit
+#        So t1a does NOT belong to this Item_subselect
+#          skipped to next item
+#
+#        t2a defined in (select #5), so unit chain is {(select #5)->unit, (select #4)->unit, (select #1)->unit, ...}
+#        this->unit is (select #4)->unit
+#        So t2a belongs to this Item_subselect
+#        Item_field(t2a)->field is populated
+#        field->map->table is 0b10
+#        used_tables_cache is 0b10
+#
+#      end loop
+#      used_tables_cache is 0b10
+#
+#    Item_subselect::recalc_used_tables  called on (select count(*) from t4 where ...)
+#      new_parent        (select #2)
+#        table_list is {t3}
+#        tables are    (t3)
+#      set outer bit this->min_resolved_nest_level(0) is less than new_parent->nest_level (1)
+#      used_tables_cache= OUTER_BIT_TABLE_REF
+#      loop though (select #2)::outer_references_resolved_here {}
+#      end loop
+#      used_tables_cache is OUTER_BIT_TABLE_REF
+#
+#    Item_subselect::recalc_used_tables  called on (select count(*) from t6 where ...)
+#      new_parent        (select #4)
+#        table_list is {t5}
+#        tables are    (t5)
+#      set outer bit this->min_resolved_nest_level(0) is less than new_parent->nest_level (1)
+#      used_tables_cache= OUTER_BIT_TABLE_REF
+#      loop though (select #2)::outer_references_resolved_here {}
+#      end loop
+#      used_tables_cache is OUTER_BIT_TABLE_REF
+#
+#  JOIN::optimize /// convert_subq_to_sj() /// sj_nest->sj_on_expr->fix_after_pullout ///
+#
+#    here select 2 is merged into select 1, looking like this
+#      select t1a, t1b, t1c, t2a, t2b, t2c from (t3) join t1 join t2 where t1a in (subquery#2) and t2a in (subquery#4)
+#
+#    Item_subselect::recalc_used_tables  called on (select count(*) from t4 where ...)
+#      new_parent        (select #1)
+#        table_list is {t1,t2,t3}
+#        tables are    (t3,t2,t1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      used_tables_cache= 0
+#      loop though (select #1)::outer_references_resolved_here {t1a, t2a}
+#
+#        t1a defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So t1a belongs to this Item_subselect
+#        Item_field(t1a)->field is populated
+#        field->map->table is 0b1
+#        used_tables_cache is 0b1
+#
+#        t2a defined in (select #5), so unit chain is {(select #5)->unit, (select #4)->unit, (select #1)->unit, ...}
+#        this->unit is (select #2)->unit
+#        So t2a does NOT belong to this Item_subselect
+#          skipped to next item
+#
+#      end loop
+#      used_tables_cache is 0b1
+#
+#    here select 4 is merged into select 1, now looks like this
+#      select t1a, t1b, t1c, t2a, t2b, t2c from (t5) join (t3) join t1 join t2 where 1 and t2a in (subquery#4) and 10 > (subquery#3) and t1a = t3b
+#
+#    Item_subselect::recalc_used_tables  called on (select count(*) from t6 where ...)
+#      new_parent        (select #1)
+#        table_list is {t1,t2,t3,t5}
+#        tables are    (t5,t3,t2,t1)
+#      no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#      used_tables_cache= 0
+#      loop though (select #1)::outer_references_resolved_here {t1a, t2a}
+#
+#        t1a defined in (select #3), so unit chain is {(select #3)->unit, (select #2)->unit, (select #1)->unit, ...}
+#        this->unit is (select #4)->unit
+#        So t1a doesn't belong to this Item_subselect
+#          skipped to next item
+#
+#        t2a defined in (select #5), so unit chain is {(select #5)->unit, (select #4)->unit, (select #1)->unit, ...}
+#        this->unit is (select #4)->unit
+#        So t2a does belong to this Item_subselect
+#        Item_field(t2a)->field is populated
+#        field->map->table is 0b10
+#        used_tables_cache is 0b10
+#
+#      end loop
+#      used_tables_cache is 0b10
+#
+#    no more interesting transformations
+#
+#    Item_subselect::recalc_used_tables identical to above to completion
+
+
+
+
+#  next we need to test Item_belongs_to by introducing an element that fails the test
+#  outer_reference t2a which is resolved in select 1 does not belong to
+#  Item_subselect t1a in (select #2).
+#  similarly, t1a, resolved in the same place, does not belong in
+#  Item_subselect t2a in (select #4).
+let $v= 3.2.0.0.2.2;
+let $q= select * from v1, v2                            -- select #1
+where
+v1a in
+(
+  select t5b from t5                                    -- select #2
+  where 100 >
+  (
+    select count(*) from t4 where t4b < v1a             -- select #3
+  )
+)
+and 
+v2a in
+(
+  select t7c*t7a from t7                                -- select #4
+  where 100 >
+  (
+    select count(*) from t6 where t6b < v2a             -- select #5
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+#  as above but unable to do top level merge due to disjunction in where clause
+let $v= 3a.2.0.0.2.0;
+let $q= select * from t1, t2                            -- select #1
+where
+t1a in
+(
+  select t5b from t5                                    -- select #2
+  where 100 >
+  (
+    select count(*) from t4 where t4b < t1a             -- select #3
+  )
+)
+or 
+t2a in
+(
+  select t7c*t7a from t7                                -- select #4
+  where 100 >
+  (
+    select count(*) from t6 where t6b < t2a             -- select #5
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+#  as above but unable to do top level merge due to disjunction in where clause
+
+let $v= 3a.2.0.0.2.2;
+let $q= select * from v1, v2                            -- select #1
+where
+v1a in
+(
+  select t5b from t5                                    -- select #2
+  where 100 >
+  (
+    select count(*) from t4 where t4b < v1a             -- select #3
+  )
+)
+or 
+v2a in
+(
+  select t7c*t7a from t7                                -- select #4
+  where 100 >
+  (
+    select count(*) from t6 where t6b < v2a             -- select #5
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+
+# Class 4, unions
+#   unions will prevent merges, but for the sake of numbering, we will continue
+#   as if they don't
+
+let $v= 4.1.1.0.4.0;
+let $q= select t1a from t1                           -- select 1, parent
+where t1a in
+(
+  select t2c from t2 where t2a >= some               -- select 2, merge
+  (
+    select t3a from t3 where t3b in                  -- select 3, parent
+    (
+      select t4a from t4 where t4b > t2c             -- select 4, merge
+    )
+    union
+    select t5a from t5 where t5b in                  -- select 5, parent
+    (
+      select t6a from t6 where t6b in                -- select 6, merge, parent
+      (
+        select t7a from t7 where t7b >= t1c          -- select 7, merge
+      )
+    )
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 4.2.1.0.4.0;
+let $q= select t1a from t1                            -- select 1, parent
+where t1a in
+(
+  select t2a from t2 where t2b >= some                -- select 2, merge
+  (
+    select t3a from t3 where t3b in                   -- select 3, non-mergable
+    (
+      select t4a from t4 where t4b >= t1a and t4c in  -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b          -- select 5, merge
+      )
+      union
+      select t4a from t4 where t4a > t1a              -- select 6
+    )
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+let $v=4a.2.1.0.4.0;
+let $q= select t1a from t1                            -- select 1, parent
+where t1a in
+(
+  select t2a from t2 where t2b >= some                -- select 2,
+  (
+    select t3a from t3 where t3b in                   -- select 3,
+    (
+      select t4a from t4 where t4b >= t1a and t4c in  -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b          -- select 5, merge O.R.
+      )
+    )
+  )
+)
+union
+select t7a from t7                                    -- select 6
+where t7a in
+(
+      select t4a from t4 where t4a > t7a              -- select 7, O.R.
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 4b.2.1.0.4.0;
+let $q= select t1a from t1                            -- select 1, parent
+where t1a in
+(
+  select t2a from t2 where t2b >= some                -- select 2,
+  (
+    select t3a from t3 where t3b in                   -- select 3,
+    (
+      select t4a from t4 where t4b >= t1a and t4c in  -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b          -- select 5, merge O.R.
+      )
+    )
+  )
+  union
+  select t7a from t7                                  -- select 6
+  where t7a in
+  (
+        select t4a from t4 where t4a > t7a            -- select 7, O.R.
+  )
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# swap to derived table instead of subquery
+# Note: scope of search resolution cannot escape derived table.
+#   unable to parse test case 4.0.1.0.0.3.0
+let $v= 4.0.1.0.3.0;
+let $q= select t1a from t1,                    -- select 1, parent
+(
+  select t2a from t2 where t2b >= some         -- select 2, merge
+  (
+    select t3a from t3 where t3b in            -- select 3, non-mergable
+    (
+      select t4a from t4 where t4c in          -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b   -- select 5, merge
+      )
+      union
+      select t4a from t4                       -- select 6
+    )
+  )
+) dt
+where t1a = t2a;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# swap to derived table instead of subquery
+# Note: scope of search resolution cannot escape derived table.
+#   unable to parse test case 4.0.1.0.0.3.0
+
+let $v= 4a.0.1.0.3.0;
+let $q= select t1a from t1,                     -- select 1, parent
+(
+  select t2a from t2 where t2b >= some          -- select 2, merge
+  (
+    select t3a from t3 where t3b in             -- select 3, non-mergable
+    (
+      select t4a from t4 where t4c in           -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b    -- select 5, merge
+      )
+    )
+  )
+) dt
+where t1a = t2a
+union
+select t5a from t5 where t5b in
+(
+  select t7b from t7 where t7c < t5c
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+
+#  swap to derived table instead of subquery
+let $v= 4.0.1.0.3.0;
+let $q= select t1a from t1,                     -- select 1, parent
+(
+  select t2a from t2 where t2b >= some          -- select 2, merge
+  (
+    select t3a from t3 where t3b in             -- select 3, non-mergable
+    (
+      select t4a from t4 where t4c in           -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t2b    -- select 5, merge
+      )
+      union
+      select t4a from t4                        -- select 6
+    )
+  )
+) dt
+where t1a = t2a;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# Class 5
+# subqueries in group by and order by with references to parent select_lex
+
+let $v= 5.1.0.0.1.0;
+let $q= select t1a as col1, t1b as col2 from t1
+group by (select col1) order by col1;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.2.0.0.1.0;
+let $q= select t1a as col1, t1b as col2 from t1
+group by (select col1 + col2) order by col1;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.1.0.0.1.1;
+let $q= select t1a as col1, t1b+t1c as col2 from t1
+group by (select col1) order by col1;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v=5.2.0.0.2.2;
+let $q=select t1a+t2a as col1, t1b+t2b as col2 from t1 join t2 on t1c=t2c
+group by (select col1 + col2) order by (select col1 + col2);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.1.1.0.1.0;
+let $q= select * from t2 where t2a in
+(
+  select t1a as col1 from t1
+    group by (select col1 > t2b) order by col1
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.1.1.0.1.1;
+let $q= select * from t2 where t2a*2 in
+(
+  select t1a+t2a as col1 from t1
+    group by (select col1 > t2b) order by col1
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.2.1.0.1.2;
+let $q= select * from v2 where v2a in
+(
+  select t1a*25 as col1 from t1
+    group by (select col1 < v2a + v2b) order by t1a
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5.2.2.0.1.2;
+let $q= select * from v2 where v2a in
+(
+  select t1a*25 as col1 from t1
+    group by (select col1 < v2a + v2b) order by col1
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v= 5a.2.2.0.1.2;
+let $q= select * from v2 where v2a in
+(
+  select t1a*25 as col1 from t1
+    group by (select col1 < v2a + v2b) order by (select col1 < v2b)
+);
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+# Class 6 subquery merge into derived merge
+# we have subqueries at the lowest level
+# derived tables at the upper level, all mergeable.
+
+# swap to derived table instead of subquery
+let $v= 6.1.0.0.2.0;
+let $q= select t1a from t1,                                     -- select 1, parent
+(
+  select t2a from t2,                                           -- select 2, merge
+  (
+    select t3a from t3 where t3b in                             -- select 3, non-mergable
+    (
+      select t4a from t4 where t4c in                           -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t3b                    -- select 5, merge
+      )
+    )
+  ) dt2
+  where t2b = t3a
+) dt
+where t1a = t2a;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+# swap to derived table instead of subquery
+let $v= 6.2.0.0.2.0;
+let $q= select t1a from t1,                                     -- select 1, parent
+(
+  select t2a from t2,                                           -- select 2, merge
+  (
+    select t3a from t3 where t3b in                             -- select 3, non-mergable
+    (
+      select t4a from t4 where t4c in                           -- select 4, parent
+      (
+        select t6a from t6  where t6b >= t3b                    -- select 5, merge
+          and t6c >= t4c
+      )
+    )
+  ) dt2
+  where t2b = t3a
+) dt
+where t1a = t2a;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+
+
+
+
+# reference to an implicitly named column in a derived table in where clause,
+# mergeable subselect
+
+--echo test 7a
+select * from
+(
+  select t1a, t1b from t1
+) dt
+where
+t1a in
+(
+  select t2a from t2 where t2b >= t1b
+);
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#fix_outer_fields()
+#  checks outer_context(
+#  find_field_in_tables()
+#    finds field t1b in outer_context->*tables
+#    it is a view field
+#    adds Item_field t1b to outer_context->select_lex::outer_reference_resolved_here (select 1)
+#
+#
+#JOIN::prepare
+#Item_subselect::recalc_used_tables()
+#  no outer bit this->min_resolved_nest_level(0) is not less than new_parent->nest_level (0)
+#  new_parent is select #1
+#  new_parent->outer_references_resolved_here, 1 element {t1b}
+#  element belongs to this->unit?
+#    defined is (select #2)
+#    defined master_unit() == this->unit  (true)
+#  item->field is NULL, but we do have item->cached_table
+#    use cached_table->field_translation to get item pointed (t1a)
+#    collect bitmaps for Item_fields within expressions in t1a
+#    'add' this bitmap to used_tables_cache  we 'add' t1b table bitmap to used_tables_cache
+#
+#  no more items
+
+
+
+
+# reference to outer table in select list
+--echo test 7b.1
+select
+(
+  select sum(t2a) from t2 where t2b > t1a group by t1b limit 1
+) as col1,
+t1b from t1;
+
+# multiple references to outer table in select list
+
+--echo test 7b.2
+select
+(
+  select sum(t2a) from t2 where t2b > t1a group by t1b limit 1
+) as col1,
+(
+  select sum(t3a) from t3 where t3b > t1a group by t3b limit 1
+) as col2,
+t1b from t1;
+
+
+create table ambiguous like t1;
+#  different data to t1
+insert into ambiguous values (1, 1, 1);
+
+# we need to test that t1a, which refers to the table ambiguous, remains
+# referring to this after a merge
+
+--echo test 7c
+select t1a from t1                                      -- select 1
+where t1a in
+(
+  select t1a from ambiguous where t1a >= some           -- select 2
+  (
+    select t3a from t3 where t1a=t3b                    -- select 3
+  )
+);
+
+#collection of SELECT_LEX::outer_reference_resolved_here
+#
+#during JOIN::prepare on  select 3, setup_conds calls
+#
+#fix_outer_fields()  on Item_field t1a
+#  checks outer_context()     which is select 2
+#  find_field_in_tables()
+#    finds field t1a in outer_context->*tables  (ambiguous)
+#    adds Item_field t1a to outer_context->select_lex::outer_reference_resolved_here
+#
+#Item_subselect::recalc_used_tables() on (select #3)
+#  new_parent is select #2
+#  no outer bit this->min_resolved_nest_level(1) is not less than new_parent->nest_level (1)
+#  new_parent->outer_references_resolved_here, 1 element {t1a}
+#  element belongs to this->unit?
+#    defined is (select #3)
+#    defined master_unit() == this->unit  (true)
+#  we have item->field, we 'add' t1a table bitmap to used_tables_cache
+#
+#  no more items
+#
+#call convert_join_subqueries_to_semijoins
+#fix_after_pullout()
+#calls Item_subselect::fix_after_pullout
+#calls Item_subselect::recalc_used_tables again
+#  new_parent is now select #1
+#  no outer bit this->min_resolved_nest_level(1) is not less than new_parent->nest_level (0)
+#  new_parent->outer_references_resolved_here, 1 element {t1a}
+#  element belongs to this->unit?
+#    defined is (select #3)
+#    defined master_unit() == this->unit  (true)
+#  we have item->field, we 'add' t1a table bitmap to used_tables_cache
+#
+#Item_subselect::recalc_used_tables called many more times after merge during optimization
+
+
+# test cascading merges
+
+let $v=7d.1
+let $q=
+  select * from t1
+    where t1c in
+    (
+      select * from
+      (
+        select t2a from t2
+          where t2a in
+          (
+            select t3a from (select * from t3) table3
+              where t3a in
+              (
+                 select t4a from t4
+                   where t4a < any(select t5c from t5 where t5a > t3a)
+              )
+          )
+      ) dt
+    );
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v=7d.2
+let $q=
+  select * from t1
+    where t1c in
+    (
+      select * from
+      (
+        select t2a from t2
+          where t2a in
+          (
+            select t3a from (select * from t3) table3
+              where t3a in
+              (
+                 select t4a from t4
+                   where t4a < any(select t5c from t5 where t5a < t3a + t3b)
+              )
+          )
+      ) dt
+    );
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v=7c.1
+let $q= select * from (select * from v3) dt;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+let $v=7c.2
+let $q= select * from (select * from v4) dt;
+
+echo test 0.$v;
+eval $q;
+echo test 1.$v;
+eval prepare s from '$q';
+execute s;
+execute s;
+echo test 2.$v;
+eval select * from ($q) dt;
+echo test 3.$v;
+eval create view v as $q;
+select * from v;
+select * from v;
+drop view v;
+echo test 4.$v;
+eval with cte as ($q) select * from cte;
+echo test 5.$v;
+eval create procedure p() $q;
+call p();
+call p();
+drop procedure p;
+
+drop view v1, v2, v3, v4;
+drop table t1, t2, t3, t4, t5, t6, t7, ambiguous;
