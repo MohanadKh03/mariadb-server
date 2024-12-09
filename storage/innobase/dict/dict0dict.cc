@@ -199,7 +199,7 @@ dict_tables_have_same_db(
 void dict_table_close(dict_table_t *table)
 {
   if (table->get_ref_count() == 1 &&
-      dict_stats_is_persistent_enabled(table) &&
+      table->stats_is_persistent() && // FIXME
       strchr(table->name.m_name, '/'))
   {
     /* It looks like we are closing the last handle. The user could
@@ -238,7 +238,7 @@ dict_table_close(
     dict_table_close(table);
   else
   {
-    if (table->release() && dict_stats_is_persistent_enabled(table) &&
+    if (table->release() && table->stats_is_persistent() && // FIXME
 	strchr(table->name.m_name, '/'))
     {
       /* Force persistent stats re-read upon next open of the table so
