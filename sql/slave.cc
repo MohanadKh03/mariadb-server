@@ -2922,7 +2922,8 @@ void store_master_info(THD *thd, Master_info *mi, TABLE *table,
   Field **field= table->field;
   const char *msg;
   Rpl_filter *rpl_filter= mi->rpl_filter;
-  StringBuffer<256> tmp;
+  char tmp_buff[256];
+  String tmp(tmp_buff, sizeof(tmp_buff), &my_charset_bin);
   time_t master_timestamp, slave_timestamp;
   DBUG_ENTER("store_master_info_data");
 
@@ -2965,7 +2966,16 @@ void store_master_info(THD *thd, Master_info *mi, TABLE *table,
   store_string(field++, msg);
   (*field++)->store((ulonglong) mi->rli.group_relay_log_pos, true);
   store_string(field++, mi->rli.group_master_log_name);
-  store_string(field++, &slave_running[mi->slave_running]);
+  switch (uint mi_slave_running= mi->slave_running) ///< volatile
+  {
+    case MYSQL_SLAVE_RUN_NOT_CONNECT:
+      tmp.length(my_snprintf(tmp_buff, sizeof(tmp_buff),
+        "Connecting (attempt %lu of %lu max)", /*TODO*/0, master_retry_count));
+      (*field++)->store(tmp.ptr(), tmp.length(), &my_charset_bin);
+      break;
+    default:
+      store_string(field++, &slave_running[mi_slave_running]);
+  }
   store_string(field++, mi->rli.slave_running ? &msg_yes : &msg_no);
   store_list(field++, rpl_filter->get_do_db());
   store_list(field++, rpl_filter->get_ignore_db());

@@ -10638,7 +10638,9 @@ ST_FIELD_INFO slave_status_info[]=
   Column("Relay_Log_File", Varchar(FN_REFLEN), NOT_NULL),
   Column("Relay_Log_Pos", ULonglong(10), NOT_NULL),
   Column("Relay_Master_Log_File", Varchar(FN_REFLEN), NOT_NULL),
-  Column("Slave_IO_Running", Varchar(10), NOT_NULL),
+  Column("Slave_IO_Running", Varchar(sizeof("Connecting (attempt  of  max)") +
+    2 * sizeof(sizeof(ulong) == 4 ? "4294967295": "18446744073709551615") // intended feature?
+  ), NOT_NULL),
   Column("Slave_SQL_Running", Varchar(3), NOT_NULL),
   Column("Replicate_Do_DB", Name(), NOT_NULL),
   Column("Replicate_Ignore_DB", Name(), NOT_NULL),
