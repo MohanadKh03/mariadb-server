@@ -12684,7 +12684,7 @@ int create_table_info_t::create_table(bool create_fk)
 					    " on table %s. Please check"
 					    " the index definition to"
 					    " make sure it is of correct"
-					    " type\n",
+					    " type",
 					    FTS_DOC_ID_INDEX_NAME,
 					    m_table->name.m_name);
 
