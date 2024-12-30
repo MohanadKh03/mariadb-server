@@ -2710,14 +2710,16 @@ err_exit:
 	    && !trx->check_unique_secondary && !trx->check_foreigns
 	    && !trx->dict_operation
 	    && block->page.id().page_no() == index->page
-	    && !index->table->is_native_online_ddl()
-	    && (!dict_table_is_partition(index->table)
-	        || thd_sql_command(trx->mysql_thd) == SQLCOM_INSERT)) {
+	    && !index->table->is_native_online_ddl()) {
 
+		int sql_com= thd_sql_command(trx->mysql_thd);
 		if (!index->table->n_rec_locks
 		    && !index->table->versioned()
 		    && !index->table->is_temporary()
-		    && !index->table->has_spatial_index()) {
+		    && !index->table->has_spatial_index()
+		    && (!dict_table_is_partition(index->table)
+		        || sql_com == SQLCOM_INSERT
+			|| sql_com == SQLCOM_INSERT_SELECT)) {
 
 			ut_ad(!index->table->skip_alter_undo);
 			trx->bulk_insert = true;
